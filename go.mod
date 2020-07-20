@@ -1,4 +1,4 @@
-module github.com/haccht/vpls-blackhole
+module github.com/haccht/vplsbh
 
 go 1.13
 

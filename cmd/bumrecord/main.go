@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"time"
 
 	"github.com/haccht/vplsbh/cache"
@@ -24,14 +25,14 @@ import (
 )
 
 const (
-	PCAP_SNAPSHOT_LEN = 78
+	PCAP_SNAPSHOT_LEN = 65536
 	PCAP_PROMISCUOUS  = true
 
 	REDIS_URL = "redis://localhost:6379"
 
 	INFLUXDB_URL      = "http://localhost:8086"
 	INFLUXDB_DATABASE = "vplsbh"
-	INFLUXDB_SERIES   = "loopdetect"
+	INFLUXDB_SERIES   = "bumrecord"
 )
 
 type tuple struct {
@@ -41,7 +42,6 @@ type tuple struct {
 type Monitor struct {
 	mo     *MonitorOption
 	c1     *cache.TTLCache // In-memory KVS to map MPLS Label     -> Domain, PeerID
-	c2     *cache.TTLCache // In-memory KVS to map Domain, SrcMAC -> Domain, PeerID, SrcMAC
 	logger *log.Logger
 }
 
@@ -49,7 +49,6 @@ func NewMonitor(mo *MonitorOption) *Monitor {
 	m := &Monitor{
 		mo:     mo,
 		c1:     cache.NewTTLCache(5 * time.Minute),
-		c2:     cache.NewTTLCache(12 * time.Hour),
 		logger: log.New(os.Stdout, "", log.LstdFlags),
 	}
 
@@ -117,7 +116,7 @@ func (m *Monitor) OpenPcapHandle() (*pcap.Handle, error) {
 	return pcap.OpenLive(m.mo.Interface, PCAP_SNAPSHOT_LEN, PCAP_PROMISCUOUS, pcap.BlockForever)
 }
 
-func (m *Monitor) Write(ch <-chan *tuple) {
+func (m *Monitor) Write(ch <-chan map[string]string) {
 	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: INFLUXDB_URL})
 	if err != nil {
 		m.logger.Printf("Could not connect to InfluxDB: %s", err.Error())
@@ -127,42 +126,31 @@ func (m *Monitor) Write(ch <-chan *tuple) {
 
 	tick := time.NewTicker(time.Duration(m.mo.Interval) * time.Second)
 	conf := influx.BatchPointsConfig{Database: INFLUXDB_DATABASE, Precision: "s"}
-	count := make(map[tuple]int)
 
+	bp, _ := influx.NewBatchPoints(conf)
 	for {
 		select {
-		case t, ok := <-ch:
+		case tags, ok := <-ch:
 			if !ok {
 				tick.Stop()
 				return
 			}
 
-			count[*t] += 1
+			fields := map[string]interface{}{"event": 1}
+			pt, _ := influx.NewPoint(INFLUXDB_SERIES, tags, fields)
+			bp.AddPoint(pt)
 		case <-tick.C:
-			bp, _ := influx.NewBatchPoints(conf)
-
-			var n int
-			for t, c := range count {
-				tags := map[string]string{"Domain": t.Domain, "PeerID": t.PeerID, "SrcMAC": t.SrcMAC}
-				fields := map[string]interface{}{"count": c}
-
-				pt, _ := influx.NewPoint(INFLUXDB_SERIES, tags, fields)
-				bp.AddPoint(pt)
-
-				n += c
-				delete(count, t)
-			}
-
 			if err = db.Write(bp); err != nil {
 				m.logger.Printf("Could not write points to InfluxDB: %s", err.Error())
 			} else if m.mo.Verbose {
-				m.logger.Printf("Dump %d points to InfluxDB.", n)
+				m.logger.Printf("Dump %d points to InfluxDB.", len(bp.Points()))
 			}
+			bp, _ = influx.NewBatchPoints(conf)
 		}
 	}
 }
 
-func (m *Monitor) Read(ch chan<- *tuple) error {
+func (m *Monitor) Read(ch chan<- map[string]string) error {
 	var eth layers.Ethernet
 	var vpls l2vpn.VPLS
 	var pwmcw l2vpn.PWMCW
@@ -201,39 +189,50 @@ func (m *Monitor) Read(ch chan<- *tuple) error {
 			continue
 		}
 
-		var v interface{}
-		var ok bool
-
-		// Get the cached Domain and PeerID pair
-		v, ok = m.c1.Get(vpls.Label)
+		v, ok := m.c1.Get(vpls.Label)
 		if !ok {
 			continue
 		}
+		t := v.(*tuple)
 
-		t1 := v.(*tuple)
-		key := tuple{Domain: t1.Domain, SrcMAC: eth.SrcMAC.String()}
-		val := tuple{Domain: t1.Domain, PeerID: t1.PeerID, SrcMAC: key.SrcMAC}
-
-		// Get the last learned Domain, PeerID and SrcMAC tuple
-		v, ok = m.c2.Get(key)
-		m.c2.Set(key, &val)
-		if !ok {
-			continue
+		tags := map[string]string{
+			"domain":   t.Domain,
+			"protocol": eth.EthernetType.String(),
 		}
 
-		// Check if the PeerID has changed
-		t2 := v.(*tuple)
-		if t1.Domain == t2.Domain && t1.PeerID != t2.PeerID {
-			if m.mo.Verbose {
-				m.logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s PeerID=%s, previously learned from PeerID=%s\n", t1.Domain, eth.DstMAC, eth.SrcMAC, t1.PeerID, t2.PeerID)
-			}
-			ch <- &val
+		// Broadcast, Multicast, Unknown-Unicast
+		switch {
+		case reflect.DeepEqual(eth.DstMAC, layers.EthernetBroadcast):
+			tags["type"] = "broadcast"
+		case eth.DstMAC[0]&0x01 == 1: //I/G bit
+			tags["type"] = "multicast"
+		default:
+			tags["type"] = "unicast"
 		}
+
+		// Frame size (include FCS)
+		length := len(eth.Contents) + len(eth.Payload) + 4
+		switch {
+		case length < 128:
+			tags["length"] = "64-127"
+		case length < 256:
+			tags["length"] = "128-255"
+		case length < 512:
+			tags["length"] = "256-511"
+		case length < 1024:
+			tags["length"] = "512-1023"
+		case length < 1519:
+			tags["length"] = "1024-1518"
+		default:
+			tags["length"] = "1519-"
+		}
+
+		ch <- tags
 	}
 }
 
 func (m *Monitor) Run() error {
-	ch := make(chan *tuple, 1000)
+	ch := make(chan map[string]string, 1000)
 	defer close(ch)
 
 	go m.Write(ch)
