@@ -39,6 +39,10 @@ type tuple struct {
 	Domain, PeerID, SrcMAC string
 }
 
+type metadata struct {
+	Domain, EthernetType, FrameType, Length string
+}
+
 type Monitor struct {
 	mo     *MonitorOption
 	c1     *cache.TTLCache // In-memory KVS to map MPLS Label     -> Domain, PeerID
@@ -116,7 +120,7 @@ func (m *Monitor) OpenPcapHandle() (*pcap.Handle, error) {
 	return pcap.OpenLive(m.mo.Interface, PCAP_SNAPSHOT_LEN, PCAP_PROMISCUOUS, pcap.BlockForever)
 }
 
-func (m *Monitor) Write(ch <-chan map[string]string) {
+func (m *Monitor) Write(ch <-chan *metadata) {
 	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: INFLUXDB_URL})
 	if err != nil {
 		m.logger.Printf("Could not connect to InfluxDB: %s", err.Error())
@@ -126,31 +130,42 @@ func (m *Monitor) Write(ch <-chan map[string]string) {
 
 	tick := time.NewTicker(time.Duration(m.mo.Interval) * time.Second)
 	conf := influx.BatchPointsConfig{Database: INFLUXDB_DATABASE, Precision: "s"}
+	count := make(map[metadata]int)
 
-	bp, _ := influx.NewBatchPoints(conf)
 	for {
 		select {
-		case tags, ok := <-ch:
+		case m, ok := <-ch:
 			if !ok {
 				tick.Stop()
 				return
 			}
 
-			fields := map[string]interface{}{"event": 1}
-			pt, _ := influx.NewPoint(INFLUXDB_SERIES, tags, fields)
-			bp.AddPoint(pt)
+			count[*m] += 1
 		case <-tick.C:
+			bp, _ := influx.NewBatchPoints(conf)
+
+			var n int
+			for m, c := range count {
+				tags := map[string]string{"domain": m.Domain, "protocol": m.EthernetType, "type": m.FrameType, "length": m.Length}
+				fields := map[string]interface{}{"event": c}
+
+				pt, _ := influx.NewPoint(INFLUXDB_SERIES, tags, fields)
+				bp.AddPoint(pt)
+
+				n += c
+				delete(count, m)
+			}
+
 			if err = db.Write(bp); err != nil {
 				m.logger.Printf("Could not write points to InfluxDB: %s", err.Error())
 			} else if m.mo.Verbose {
-				m.logger.Printf("Dump %d points to InfluxDB.", len(bp.Points()))
+				m.logger.Printf("Dump %d points to InfluxDB.", n)
 			}
-			bp, _ = influx.NewBatchPoints(conf)
 		}
 	}
 }
 
-func (m *Monitor) Read(ch chan<- map[string]string) error {
+func (m *Monitor) Read(ch chan<- *metadata) error {
 	var eth layers.Ethernet
 	var vpls l2vpn.VPLS
 	var pwmcw l2vpn.PWMCW
@@ -195,44 +210,45 @@ func (m *Monitor) Read(ch chan<- map[string]string) error {
 		}
 		t := v.(*tuple)
 
-		tags := map[string]string{
-			"domain":   t.Domain,
-			"protocol": eth.EthernetType.String(),
+		// Domain and EthernetType
+		m := &metadata{
+			Domain:       t.Domain,
+			EthernetType: eth.EthernetType.String(),
 		}
 
 		// Broadcast, Multicast, Unknown-Unicast
 		switch {
 		case reflect.DeepEqual(eth.DstMAC, layers.EthernetBroadcast):
-			tags["type"] = "broadcast"
+			m.FrameType = "broadcast"
 		case eth.DstMAC[0]&0x01 == 1: //I/G bit
-			tags["type"] = "multicast"
+			m.FrameType = "multicast"
 		default:
-			tags["type"] = "unicast"
+			m.FrameType = "unicast"
 		}
 
 		// Frame size (include FCS)
 		length := len(eth.Contents) + len(eth.Payload) + 4
 		switch {
 		case length < 128:
-			tags["length"] = "64-127"
+			m.Length = "64-127"
 		case length < 256:
-			tags["length"] = "128-255"
+			m.Length = "128-255"
 		case length < 512:
-			tags["length"] = "256-511"
+			m.Length = "256-511"
 		case length < 1024:
-			tags["length"] = "512-1023"
+			m.Length = "512-1023"
 		case length < 1519:
-			tags["length"] = "1024-1518"
+			m.Length = "1024-1518"
 		default:
-			tags["length"] = "1519-"
+			m.Length = "1519-"
 		}
 
-		ch <- tags
+		ch <- m
 	}
 }
 
 func (m *Monitor) Run() error {
-	ch := make(chan map[string]string, 1000)
+	ch := make(chan *metadata, 1000)
 	defer close(ch)
 
 	go m.Write(ch)
