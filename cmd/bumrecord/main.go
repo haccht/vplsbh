@@ -36,7 +36,7 @@ const (
 )
 
 type tuple struct {
-	Domain, PeerID, SrcMAC string
+	Domain, Remote, SrcMAC string
 }
 
 type metadata struct {
@@ -45,7 +45,7 @@ type metadata struct {
 
 type Monitor struct {
 	mo     *MonitorOption
-	c1     *cache.TTLCache // In-memory KVS to map MPLS Label     -> Domain, PeerID
+	c1     *cache.TTLCache // In-memory KVS to map MPLS Label     -> Domain, Remote
 	logger *log.Logger
 }
 
@@ -69,13 +69,13 @@ func NewMonitor(mo *MonitorOption) *Monitor {
 		defer conn.Close()
 
 		key := fmt.Sprintf("label:%d", k)
-		val, err := redis.Values(conn.Do("HMGET", key, "Domain", "PeerID"))
+		val, err := redis.Values(conn.Do("HMGET", key, "Domain", "Remote"))
 		if err != nil {
 			return nil, false
 		}
 
 		t := &tuple{}
-		if _, err := redis.Scan(val, &t.Domain, &t.PeerID); err != nil {
+		if _, err := redis.Scan(val, &t.Domain, &t.Remote); err != nil {
 			return nil, false
 		}
 

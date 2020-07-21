@@ -35,13 +35,13 @@ const (
 )
 
 type tuple struct {
-	Domain, PeerID, SrcMAC string
+	Domain, Remote, SrcMAC string
 }
 
 type Monitor struct {
 	mo     *MonitorOption
-	c1     *cache.TTLCache // In-memory KVS to map MPLS Label     -> Domain, PeerID
-	c2     *cache.TTLCache // In-memory KVS to map Domain, SrcMAC -> Domain, PeerID, SrcMAC
+	c1     *cache.TTLCache // In-memory KVS to map MPLS Label     -> Domain, Remote
+	c2     *cache.TTLCache // In-memory KVS to map Domain, SrcMAC -> Domain, Remote, SrcMAC
 	logger *log.Logger
 }
 
@@ -66,13 +66,13 @@ func NewMonitor(mo *MonitorOption) *Monitor {
 		defer conn.Close()
 
 		key := fmt.Sprintf("label:%d", k)
-		val, err := redis.Values(conn.Do("HMGET", key, "Domain", "PeerID"))
+		val, err := redis.Values(conn.Do("HMGET", key, "Domain", "Remote"))
 		if err != nil {
 			return nil, false
 		}
 
 		t := &tuple{}
-		if _, err := redis.Scan(val, &t.Domain, &t.PeerID); err != nil {
+		if _, err := redis.Scan(val, &t.Domain, &t.Remote); err != nil {
 			return nil, false
 		}
 
@@ -143,7 +143,7 @@ func (m *Monitor) Write(ch <-chan *tuple) {
 
 			var n int
 			for t, c := range count {
-				tags := map[string]string{"Domain": t.Domain, "PeerID": t.PeerID, "SrcMAC": t.SrcMAC}
+				tags := map[string]string{"Domain": t.Domain, "Remote": t.Remote, "SrcMAC": t.SrcMAC}
 				fields := map[string]interface{}{"count": c}
 
 				pt, _ := influx.NewPoint(INFLUXDB_SERIES, tags, fields)
@@ -204,7 +204,7 @@ func (m *Monitor) Read(ch chan<- *tuple) error {
 		var v interface{}
 		var ok bool
 
-		// Get the cached Domain and PeerID pair
+		// Get the cached Domain and Remote pair
 		v, ok = m.c1.Get(vpls.Label)
 		if !ok {
 			continue
@@ -212,20 +212,20 @@ func (m *Monitor) Read(ch chan<- *tuple) error {
 
 		t1 := v.(*tuple)
 		key := tuple{Domain: t1.Domain, SrcMAC: eth.SrcMAC.String()}
-		val := tuple{Domain: t1.Domain, PeerID: t1.PeerID, SrcMAC: key.SrcMAC}
+		val := tuple{Domain: t1.Domain, Remote: t1.Remote, SrcMAC: key.SrcMAC}
 
-		// Get the last learned Domain, PeerID and SrcMAC tuple
+		// Get the last learned Domain, Remote and SrcMAC tuple
 		v, ok = m.c2.Get(key)
 		m.c2.Set(key, &val)
 		if !ok {
 			continue
 		}
 
-		// Check if the PeerID has changed
+		// Check if the Remote has changed
 		t2 := v.(*tuple)
-		if t1.Domain == t2.Domain && t1.PeerID != t2.PeerID {
+		if t1.Domain == t2.Domain && t1.Remote != t2.Remote {
 			if m.mo.Verbose {
-				m.logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s PeerID=%s, previously learned from PeerID=%s\n", t1.Domain, eth.DstMAC, eth.SrcMAC, t1.PeerID, t2.PeerID)
+				m.logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s Remote=%s, previously learned from Remote=%s\n", t1.Domain, eth.DstMAC, eth.SrcMAC, t1.Remote, t2.Remote)
 			}
 			ch <- &val
 		}
