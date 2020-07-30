@@ -170,7 +170,7 @@ func (m *Monitor) Read(ch chan<- *tuple) error {
 
 	handle, err := m.OpenPcapHandle()
 	if err != nil {
-		return fmt.Errorf("Could not open the pcap handle.\n%s", err.Error())
+		return fmt.Errorf("Could not open the pcap handle: %s", err.Error())
 	}
 	defer handle.Close()
 

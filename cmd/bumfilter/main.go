@@ -122,7 +122,7 @@ func (m *Monitor) Read(ch chan<- gopacket.Packet) error {
 
 	handle, err := m.OpenPcapHandle()
 	if err != nil {
-		return fmt.Errorf("Could not open the pcap handle.\n%s", err.Error())
+		return fmt.Errorf("Could not open the pcap handle: %s", err.Error())
 	}
 	defer handle.Close()
 
@@ -130,7 +130,7 @@ func (m *Monitor) Read(ch chan<- gopacket.Packet) error {
 	if m.mo.BPFFilter != "" {
 		bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, PCAP_SNAPSHOT_LEN, m.mo.BPFFilter)
 		if err != nil {
-			m.logger.Printf("Error compiling BPF filter: %s", err)
+			return fmt.Errorf("Error compiling BPF filter: %s", err.Error())
 		}
 	}
 
