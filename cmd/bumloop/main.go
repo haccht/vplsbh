@@ -59,7 +59,7 @@ type VPLSFDBEntry struct {
 	Domain, Remote, SrcMAC string
 }
 
-func recordBUMLoopDetect(db influx.Client, interval uint, ch chan *VPLSFDBEntry) {
+func recordLoopDetect(db influx.Client, interval uint, ch chan *VPLSFDBEntry) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
 	bpcfg := influx.BatchPointsConfig{Database: Database, Precision: "s"}
 	count := make(map[VPLSFDBEntry]int)
@@ -124,7 +124,7 @@ func main() {
 	ch := make(chan *VPLSFDBEntry, 1000)
 	defer close(ch)
 
-	go recordBUMLoopDetect(db, opt.Interval, ch)
+	go recordLoopDetect(db, opt.Interval, ch)
 
 	fdb := cache.NewTTLCache(12 * time.Hour) // In-memory KVS to map Domain, SrcMAC -> Domain, Remote, SrcMAC
 	for packet := range b.Packets() {
@@ -134,18 +134,18 @@ func main() {
 		key := VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain}
 		val := VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain, Remote: packet.Remote}
 
-		// Get the last learned Domain, Remote and SrcMAC
 		v, ok := fdb.Get(key)
 		fdb.Set(key, &val)
 		if !ok {
 			continue
 		}
 
-		// Check if the Remote has changed
-		entry := v.(*VPLSFDBEntry)
-		if packet.Domain == entry.Domain && packet.Remote != entry.Remote {
+		// Get the last learned Domain, Remote and SrcMAC and check if the Remote has changed
+		learned := v.(*VPLSFDBEntry)
+		if packet.Domain == learned.Domain && packet.Remote != learned.Remote {
 			if opt.Verbose {
-				logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s Remote=%s, previously learned from Remote=%s", packet.Domain, eth.DstMAC, eth.SrcMAC, packet.Remote, entry.Remote)
+				logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s Remote=%s, previously learned from Remote=%s",
+					packet.Domain, eth.DstMAC, eth.SrcMAC, packet.Remote, learned.Remote)
 			}
 			ch <- &val
 		}

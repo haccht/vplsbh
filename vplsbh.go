@@ -38,7 +38,7 @@ func openPcapHandle(cfg *BlackHoleConfig) (*pcap.Handle, error) {
 		return pcap.OpenLive(cfg.Interface, SnapshotLen, true, pcap.BlockForever)
 	}
 
-	return nil, errors.New("the flag `--interface` was not specified")
+	return nil, errors.New("Interface was not specified")
 }
 
 func makeBPFFilter(cfg *BlackHoleConfig) (*pcap.BPF, error) {
@@ -136,11 +136,11 @@ func (b *BlackHole) Packets() chan *VPLSPacket {
 				continue
 			}
 
-			// Remove the outer Ethernet layer
+			// Decode the outer Ethernet layer
 			parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth)
 			parser.DecodeLayers(data, &decoded)
 
-			// Parse the VPLS and inner Ethernet layers
+			// Decode the VPLS and inner Ethernet layers
 			parser = gopacket.NewDecodingLayerParser(layers.LayerTypeMPLS, &vpls, &pwmcw, &eth)
 			parser.DecodeLayers(eth.Payload, &decoded)
 
@@ -179,7 +179,6 @@ func (b *BlackHole) Packets() chan *VPLSPacket {
 
 			m := packet.Metadata()
 			m.CaptureInfo = baseci
-			m.Truncated = ci.CaptureLength < ci.Length
 
 			np++
 			ch <- packet
