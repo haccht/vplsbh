@@ -55,7 +55,7 @@ func (c *cmdOption) BlackHoleConfig() *vplsbh.BlackHoleConfig {
 }
 
 type VPLSPacketTags struct {
-	Domain, Protocol, Type, Length string
+	Domain, Remote, Protocol, Type, Length string
 }
 
 func recordBUMStats(db influx.Client, interval uint, ch chan *VPLSPacketTags) {
@@ -77,7 +77,7 @@ func recordBUMStats(db influx.Client, interval uint, ch chan *VPLSPacketTags) {
 
 			var n uint
 			for s, c := range count {
-				tags := map[string]string{"domain": s.Domain, "protocol": s.Protocol, "type": s.Type, "length": s.Length}
+				tags := map[string]string{"domain": s.Domain, "remote": s.Remote, "protocol": s.Protocol, "type": s.Type, "length": s.Length}
 				fields := map[string]interface{}{"event": c}
 
 				pt, _ := influx.NewPoint(Series, tags, fields)
@@ -160,6 +160,7 @@ func main() {
 
 		ch <- &VPLSPacketTags{
 			Domain:   packet.Domain,
+			Remote:   packet.Remote,
 			Type:     typeString,
 			Length:   lengthString,
 			Protocol: eth.EthernetType.String(),
