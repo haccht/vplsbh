@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/haccht/vplsbh"
@@ -10,8 +11,11 @@ import (
 
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
-
 	"github.com/jessevdk/go-flags"
+)
+
+var (
+	logger = log.New(os.Stdout, "", log.LstdFlags)
 )
 
 type cmdOption struct {
@@ -76,6 +80,7 @@ func main() {
 		w.WriteFileHeader(vplsbh.SnapshotLen, layers.LinkTypeEthernet)
 	}
 
+	logger.Printf("Start capturing packets")
 	for packet := range b.Packets() {
 		fmt.Println(packet)
 		if w != nil {

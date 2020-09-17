@@ -7,20 +7,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/gomodule/redigo/redis"
 	"github.com/haccht/vplsbh"
-	"github.com/haccht/vplsbh/cache"
 	"github.com/haccht/vplsbh/l2vpn"
 
 	"github.com/google/gopacket/layers"
 	"github.com/jessevdk/go-flags"
-
-	_ "github.com/influxdata/influxdb1-client"
-	influx "github.com/influxdata/influxdb1-client/v2"
-)
-
-const (
-	Database = "vplsbh"
-	Series   = "bumloop"
 )
 
 var (
@@ -30,7 +22,8 @@ var (
 type cmdOption struct {
 	Interface string `short:"i" long:"interface" description:"Read packets from the interface" value-name:"<interface>"`
 	ReadFile  string `short:"r" long:"read"      description:"Read packets from the pcap file" hidden:"true"`
-	InfluxDB  string `short:"d" long:"influxdb"  description:"Write packets to InfluxDB" value-name:"<url>" default:"http://localhost:8086"`
+	RedisURL  string `short:"d" long:"redis"     description:"Record packets to ForwardingDB" value-name:"<url>" default:"redis://localhost:6379"`
+	AgingTime uint   `short:"e" long:"expire"    description:"Aging time in sec to record" value-name:"<interval>" default:"300"`
 	Interval  uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
 	Verbose   bool   `short:"v" long:"verbose"   description:"Show verbose information"`
 }
@@ -59,10 +52,9 @@ type VPLSFDBEntry struct {
 	Domain, Remote, SrcMAC string
 }
 
-func record(db influx.Client, ch chan *VPLSFDBEntry, interval uint) {
+func record(db redis.Conn, ch chan *VPLSFDBEntry, agingtime, interval uint) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
-	count := make(map[VPLSFDBEntry]int)
-	bpcfg := influx.BatchPointsConfig{Database: Database, Precision: "s"}
+	entries := make(map[string]*VPLSFDBEntry)
 
 	for {
 		select {
@@ -72,26 +64,26 @@ func record(db influx.Client, ch chan *VPLSFDBEntry, interval uint) {
 				return
 			}
 
-			count[*e] += 1
+			key := fmt.Sprintf("entry:%s:%s", e.Domain, e.SrcMAC)
+			entries[key] = e
 		case <-tick.C:
-			bp, _ := influx.NewBatchPoints(bpcfg)
+			var err error
 
-			var n int
-			for e, c := range count {
-				tags := map[string]string{"Domain": e.Domain, "Remote": e.Remote, "SrcMAC": e.SrcMAC}
-				fields := map[string]interface{}{"count": c}
-
-				pt, _ := influx.NewPoint(Series, tags, fields)
-				bp.AddPoint(pt)
-
-				n += c
-				delete(count, e)
+			err = db.Send("MULTI")
+			if err != nil {
+				continue
 			}
 
-			if err := db.Write(bp); err != nil {
-				logger.Printf("Could not write points to InfluxDB: %s", err.Error())
-			} else {
-				logger.Printf("Dump %d points to InfluxDB.", n)
+			for key, e := range entries {
+				db.Do("HMSET", key, "Domain", e.Domain, "SrcMAC", e.SrcMAC, "Remote", e.Remote)
+				db.Do("EXPIRE", key, agingtime)
+
+				delete(entries, key)
+			}
+
+			_, err = db.Do("EXEC")
+			if err != nil {
+				continue
 			}
 		}
 	}
@@ -114,41 +106,23 @@ func main() {
 	}
 	defer b.Close()
 
-	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: opt.InfluxDB})
+	ch := make(chan *VPLSFDBEntry, 1000)
+	defer close(ch)
+
+	db, err := redis.DialURL(opt.RedisURL)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	ch := make(chan *VPLSFDBEntry, 1000)
-	defer close(ch)
-
 	logger.Printf("Start capturing packets")
-	go record(db, ch, opt.Interval)
+	go record(db, ch, opt.AgingTime, opt.Interval)
 
-	fdb := cache.NewTTLCache(12 * time.Hour) // In-memory KVS to map Domain, SrcMAC -> Domain, SrcMAC, Remote
 	for packet := range b.Packets() {
 		ethLayer := packet.Layer(layers.LayerTypeEthernet)
 		eth, _ := ethLayer.(*layers.Ethernet)
 
-		key := VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain}
-		val := VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain, Remote: packet.Remote}
-
-		v, ok := fdb.Get(key)
-		fdb.Set(key, &val)
-		if !ok {
-			continue
-		}
-
-		// Get the last learned Domain, Remote and SrcMAC and check if the Remote has changed
-		learned := v.(*VPLSFDBEntry)
-		if packet.Domain == learned.Domain && packet.Remote != learned.Remote {
-			if opt.Verbose {
-				logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s Remote=%s, previously learned from Remote=%s",
-					packet.Domain, eth.DstMAC, eth.SrcMAC, packet.Remote, learned.Remote)
-			}
-			ch <- &val
-		}
+		ch <- &VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain, Remote: packet.Remote}
 	}
 }

@@ -58,7 +58,7 @@ type VPLSPacketTags struct {
 	Domain, Remote, Protocol, Type, Length string
 }
 
-func recordBUMStats(db influx.Client, interval uint, ch chan *VPLSPacketTags) {
+func record(db influx.Client, ch chan *VPLSPacketTags, interval uint) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
 	bpcfg := influx.BatchPointsConfig{Database: Database, Precision: "s"}
 	count := make(map[VPLSPacketTags]uint)
@@ -123,7 +123,8 @@ func main() {
 	ch := make(chan *VPLSPacketTags, 1000)
 	defer close(ch)
 
-	go recordBUMStats(db, opt.Interval, ch)
+	logger.Printf("Start capturing packets")
+	go record(db, ch, opt.Interval)
 
 	for packet := range b.Packets() {
 		var typeString, lengthString string
