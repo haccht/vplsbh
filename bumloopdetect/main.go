@@ -22,18 +22,26 @@ import (
 )
 
 const (
-	Database = "vplsbh"
-	Series   = "bumloop"
+	influxDBAddr   = "http://localhost:8086"
+	influxDBName   = "vplsbh"
+	influxDBSeries = "bumloop"
 )
 
 var (
 	logger = log.New(os.Stdout, "", log.LstdFlags)
 )
 
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+
+	return fallback
+}
+
 type cmdOption struct {
-	GRPCAddress string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>"`
-	InfluxDB    string `short:"d" long:"influxdb"  description:"Write packets to InfluxDB" value-name:"<url>" default:"http://localhost:8086"`
-	Interval    uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
+	Address  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:":50005"`
+	Interval uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
 }
 
 func NewCmdOption(args []string) (*cmdOption, error) {
@@ -56,7 +64,7 @@ type packetEntry struct {
 func record(db influx.Client, ch chan *packetEntry, interval uint) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
 	count := make(map[packetEntry]int)
-	bpcfg := influx.BatchPointsConfig{Database: Database, Precision: "s"}
+	bpcfg := influx.BatchPointsConfig{Database: getEnv("INFLUXDB_NAME", influxDBName), Precision: "s"}
 
 	for {
 		select {
@@ -75,7 +83,7 @@ func record(db influx.Client, ch chan *packetEntry, interval uint) {
 				tags := map[string]string{"Domain": e.Domain, "Remote": e.Remote, "SrcMAC": e.SrcMAC}
 				fields := map[string]interface{}{"count": c}
 
-				pt, _ := influx.NewPoint(Series, tags, fields)
+				pt, _ := influx.NewPoint(getEnv("INFLUXDB_SERIES", influxDBSeries), tags, fields)
 				bp.AddPoint(pt)
 
 				n += c
@@ -98,14 +106,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: opt.InfluxDB})
+	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: getEnv("INFLUXDB_ADDR", influxDBAddr)})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	conn, err := grpc.Dial(opt.GRPCAddress, grpc.WithInsecure())
+	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
 	if err != nil {
 		log.Fatalf("failed to connect with server %v", err)
 	}
@@ -122,7 +130,7 @@ func main() {
 		log.Fatalf("open stream error %v", err)
 	}
 
-	fdb := cache.NewTTLCache(12 * time.Hour) // In-memory KVS to map Domain, SrcMAC -> Domain, SrcMAC, Remote
+	fdb := cache.NewTTLCache(12 * time.Hour)
 	for {
 		recv, err := stream.Recv()
 		if err == io.EOF {

@@ -27,15 +27,23 @@ import (
 )
 
 const (
-	SnapshotLen = 65536
-	Promiscuous = true
-	RedisURL    = "redis://localhost:6379"
+	snapshotLen = 65536
+	promiscuous = true
+	redisURL    = "redis://localhost:6379"
 )
 
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+
+	return fallback
+}
+
 type cmdOption struct {
-	GRPCAddress string `short:"a" long:"addr"      description:"gRPC address to serve" value-name:"<addr>"`
-	Interface   string `short:"i" long:"interface" description:"Read packets from the interface" value-name:"<interface>"`
-	Filepath    string `short:"r" long:"read"      description:"Read packets from the pcap file" hidden:"true"`
+	Address   string `short:"a" long:"addr"      description:"gRPC address to serve" value-name:"<addr>"`
+	Interface string `short:"i" long:"interface" description:"Read packets from the interface" value-name:"<interface>"`
+	Filepath  string `short:"r" long:"read"      description:"Read packets from the pcap file" hidden:"true"`
 }
 
 func NewCmdOption(args []string) (*cmdOption, error) {
@@ -69,7 +77,7 @@ func NewSniffer() *sniffer {
 		MaxIdle:     2,
 		MaxActive:   4,
 		IdleTimeout: 5 * time.Minute,
-		Dial:        func() (redis.Conn, error) { return redis.DialURL(RedisURL) },
+		Dial:        func() (redis.Conn, error) { return redis.DialURL(getEnv("REDIS_URL", redisURL)) },
 	}
 
 	// Set a lookup function used when the label key would not be found or be expired.
@@ -181,7 +189,7 @@ func (s *sniffer) Unsubscribe(ch chan<- *pb.Packet) {
 func (s *sniffer) Sniff(filter *pb.Filter, stream pb.BumSniffService_SniffServer) (err error) {
 	var bpf *pcap.BPF
 	if filter.Bpf != "" {
-		bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, SnapshotLen, filter.Bpf)
+		bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, snapshotLen, filter.Bpf)
 		if err != nil {
 			return err
 		}
@@ -237,7 +245,7 @@ func main() {
 	var openHandle func() (*pcap.Handle, error)
 	if opt.Interface != "" {
 		openHandle = func() (*pcap.Handle, error) {
-			return pcap.OpenLive(opt.Interface, SnapshotLen, Promiscuous, pcap.BlockForever)
+			return pcap.OpenLive(opt.Interface, snapshotLen, promiscuous, pcap.BlockForever)
 		}
 	} else if opt.Filepath != "" {
 		openHandle = func() (*pcap.Handle, error) {
@@ -248,7 +256,7 @@ func main() {
 	errGroup.Go(func() error {
 		log.Println("start gRPC server")
 
-		listener, err := net.Listen("tcp", opt.GRPCAddress)
+		listener, err := net.Listen("tcp", opt.Address)
 		if err != nil {
 			return fmt.Errorf("Failed to listen: %v", err)
 		}

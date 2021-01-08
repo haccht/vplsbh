@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	SnapshotLen = 65536
+	snapshotLen = 65536
 )
 
 type cmdOption struct {
-	GRPCAddress  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>"`
+	Address      string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>"`
 	BPFFilter    string `short:"e" long:"bpf"       description:"filter packets by BPF primitive" value-name:"<expression>"`
 	DomainFilter string `short:"d" long:"domain"    description:"filter packets by Bridge-Domain name" value-name:"<bdname>"`
 	PacketCount  uint   `short:"c" long:"count"     description:"exit after reading specified number of packets" value-name:"<count>"`
@@ -49,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := grpc.Dial(opt.GRPCAddress, grpc.WithInsecure())
+	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
 	if err != nil {
 		log.Fatalf("failed to connect with server %v", err)
 	}
@@ -73,7 +73,7 @@ func main() {
 		defer f.Close()
 
 		w = pcapgo.NewWriter(f)
-		w.WriteFileHeader(SnapshotLen, layers.LinkTypeEthernet)
+		w.WriteFileHeader(snapshotLen, layers.LinkTypeEthernet)
 	}
 
 	var np uint
