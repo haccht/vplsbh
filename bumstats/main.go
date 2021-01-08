@@ -1,37 +1,47 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"reflect"
 	"time"
 
-	"github.com/haccht/vplsbh"
-	"github.com/haccht/vplsbh/l2vpn"
-
+	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/jessevdk/go-flags"
+	"google.golang.org/grpc"
 
 	_ "github.com/influxdata/influxdb1-client"
 	influx "github.com/influxdata/influxdb1-client/v2"
+
+	pb "github.com/haccht/vplsbh/proto"
 )
 
 const (
-	Database = "vplsbh"
-	Series   = "bumstats"
+	influxDBAddr   = "http://localhost:8086"
+	influxDBName   = "vplsbh"
+	influxDBSeries = "bumstats"
 )
 
 var (
 	logger = log.New(os.Stdout, "", log.LstdFlags)
 )
 
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+
+	return fallback
+}
+
 type cmdOption struct {
-	Interface string `short:"i" long:"interface" description:"Read packets from the interface" value-name:"<interface>"`
-	ReadFile  string `short:"r" long:"read"      description:"Read packets from the pcap file" hidden:"true"`
-	InfluxDB  string `short:"d" long:"influxdb"  description:"Write packets to InfluxDB" value-name:"<url>" default:"http://localhost:8086"`
-	Interval  uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
+	Address  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:"127.0.0.1:50005"`
+	Interval uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
 }
 
 func NewCmdOption(args []string) (*cmdOption, error) {
@@ -47,21 +57,14 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 	return &opt, nil
 }
 
-func (c *cmdOption) BlackHoleConfig() *vplsbh.BlackHoleConfig {
-	return &vplsbh.BlackHoleConfig{
-		Interface: c.Interface,
-		ReadFile:  c.ReadFile,
-	}
-}
-
-type VPLSPacketTags struct {
+type packetTags struct {
 	Domain, Remote, Protocol, Type, Length string
 }
 
-func record(db influx.Client, ch chan *VPLSPacketTags, interval uint) {
+func record(db influx.Client, ch chan *packetTags, interval uint) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
-	bpcfg := influx.BatchPointsConfig{Database: Database, Precision: "s"}
-	count := make(map[VPLSPacketTags]uint)
+	bpcfg := influx.BatchPointsConfig{Database: getEnv("INFLUXDB_NAME", influxDBName), Precision: "s"}
+	count := make(map[packetTags]uint)
 
 	for {
 		select {
@@ -80,7 +83,7 @@ func record(db influx.Client, ch chan *VPLSPacketTags, interval uint) {
 				tags := map[string]string{"domain": s.Domain, "remote": s.Remote, "protocol": s.Protocol, "type": s.Type, "length": s.Length}
 				fields := map[string]interface{}{"event": c}
 
-				pt, _ := influx.NewPoint(Series, tags, fields)
+				pt, _ := influx.NewPoint(getEnv("INFLUXDB_SERIES", influxDBSeries), tags, fields)
 				bp.AddPoint(pt)
 
 				n += c
@@ -88,49 +91,59 @@ func record(db influx.Client, ch chan *VPLSPacketTags, interval uint) {
 			}
 
 			if err := db.Write(bp); err != nil {
-				logger.Printf("Could not write points to InfluxDB: %s", err.Error())
+				logger.Printf("failed to write points: %v", err)
 			} else {
-				logger.Printf("Dump %d points to InfluxDB.", n)
+				logger.Printf("dump %d points", n)
 			}
 		}
 	}
 }
 
 func main() {
-	// MPLS Decoder should assume that the MPLS payload is a Ethenet frame with a control-word header
-	layers.MPLSPayloadDecoder = &l2vpn.PWMCWDecoder{ControlWord: true}
-
 	opt, err := NewCmdOption(os.Args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	b, err := vplsbh.NewBlackHole(opt.BlackHoleConfig())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	defer b.Close()
-
-	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: opt.InfluxDB})
+	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: getEnv("INFLUXDB_ADDR", influxDBAddr)})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	ch := make(chan *VPLSPacketTags, 1000)
+	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("failed to connect with server: %v", err)
+	}
+	defer conn.Close()
+
+	ch := make(chan *packetTags, 1000)
 	defer close(ch)
 
-	logger.Printf("Start capturing packets")
 	go record(db, ch, opt.Interval)
 
-	for packet := range b.Packets() {
-		var typeString, lengthString string
+	client := pb.NewBumSniffServiceClient(conn)
+	stream, err := client.Sniff(context.Background(), &pb.Request{})
+	if err != nil {
+		log.Fatalf("failed to open stream: %v", err)
+	}
 
+	for {
+		recv, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("failed to receive packet: %v", err)
+		}
+
+		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)
 		ethLayer := packet.Layer(layers.LayerTypeEthernet)
 		eth, _ := ethLayer.(*layers.Ethernet)
+
+		var typeString, lengthString string
 
 		// Broadcast, Multicast, Unknown-Unicast
 		switch {
@@ -159,9 +172,9 @@ func main() {
 			lengthString = "1519-"
 		}
 
-		ch <- &VPLSPacketTags{
-			Domain:   packet.Domain,
-			Remote:   packet.Remote,
+		ch <- &packetTags{
+			Domain:   recv.Domain,
+			Remote:   recv.Remote,
 			Type:     typeString,
 			Length:   lengthString,
 			Protocol: eth.EthernetType.String(),
