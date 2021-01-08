@@ -1,21 +1,24 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
 
-	"github.com/haccht/vplsbh"
-	"github.com/haccht/vplsbh/cache"
-	"github.com/haccht/vplsbh/l2vpn"
-
+	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/jessevdk/go-flags"
+	"google.golang.org/grpc"
 
 	_ "github.com/influxdata/influxdb1-client"
 	influx "github.com/influxdata/influxdb1-client/v2"
+
+	"github.com/haccht/vplsbh/cache"
+	pb "github.com/haccht/vplsbh/proto"
 )
 
 const (
@@ -28,11 +31,9 @@ var (
 )
 
 type cmdOption struct {
-	Interface string `short:"i" long:"interface" description:"Read packets from the interface" value-name:"<interface>"`
-	ReadFile  string `short:"r" long:"read"      description:"Read packets from the pcap file" hidden:"true"`
-	InfluxDB  string `short:"d" long:"influxdb"  description:"Write packets to InfluxDB" value-name:"<url>" default:"http://localhost:8086"`
-	Interval  uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
-	Verbose   bool   `short:"v" long:"verbose"   description:"Show verbose information"`
+	GRPCAddress string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>"`
+	InfluxDB    string `short:"d" long:"influxdb"  description:"Write packets to InfluxDB" value-name:"<url>" default:"http://localhost:8086"`
+	Interval    uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
 }
 
 func NewCmdOption(args []string) (*cmdOption, error) {
@@ -48,20 +49,13 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 	return &opt, nil
 }
 
-func (c *cmdOption) BlackHoleConfig() *vplsbh.BlackHoleConfig {
-	return &vplsbh.BlackHoleConfig{
-		Interface: c.Interface,
-		ReadFile:  c.ReadFile,
-	}
-}
-
-type VPLSFDBEntry struct {
+type packetEntry struct {
 	Domain, Remote, SrcMAC string
 }
 
-func record(db influx.Client, ch chan *VPLSFDBEntry, interval uint) {
+func record(db influx.Client, ch chan *packetEntry, interval uint) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
-	count := make(map[VPLSFDBEntry]int)
+	count := make(map[packetEntry]int)
 	bpcfg := influx.BatchPointsConfig{Database: Database, Precision: "s"}
 
 	for {
@@ -98,21 +92,11 @@ func record(db influx.Client, ch chan *VPLSFDBEntry, interval uint) {
 }
 
 func main() {
-	// MPLS Decoder should assume that the MPLS payload is a Ethenet frame with a control-word header
-	layers.MPLSPayloadDecoder = &l2vpn.PWMCWDecoder{ControlWord: true}
-
 	opt, err := NewCmdOption(os.Args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
-	b, err := vplsbh.NewBlackHole(opt.BlackHoleConfig())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	defer b.Close()
 
 	db, err := influx.NewHTTPClient(influx.HTTPConfig{Addr: opt.InfluxDB})
 	if err != nil {
@@ -121,19 +105,39 @@ func main() {
 	}
 	defer db.Close()
 
-	ch := make(chan *VPLSFDBEntry, 1000)
+	conn, err := grpc.Dial(opt.GRPCAddress, grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("failed to connect with server %v", err)
+	}
+	defer conn.Close()
+
+	ch := make(chan *packetEntry, 1000)
 	defer close(ch)
 
-	logger.Printf("Start capturing packets")
 	go record(db, ch, opt.Interval)
 
+	client := pb.NewBumSniffServiceClient(conn)
+	stream, err := client.Sniff(context.Background(), &pb.Filter{})
+	if err != nil {
+		log.Fatalf("open stream error %v", err)
+	}
+
 	fdb := cache.NewTTLCache(12 * time.Hour) // In-memory KVS to map Domain, SrcMAC -> Domain, SrcMAC, Remote
-	for packet := range b.Packets() {
+	for {
+		recv, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("cannot receive %v", err)
+		}
+
+		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)
 		ethLayer := packet.Layer(layers.LayerTypeEthernet)
 		eth, _ := ethLayer.(*layers.Ethernet)
 
-		key := VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain}
-		val := VPLSFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: packet.Domain, Remote: packet.Remote}
+		key := packetEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain}
+		val := packetEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain, Remote: recv.Remote}
 
 		v, ok := fdb.Get(key)
 		fdb.Set(key, &val)
@@ -142,12 +146,8 @@ func main() {
 		}
 
 		// Get the last learned Domain, Remote and SrcMAC and check if the Remote has changed
-		learned := v.(*VPLSFDBEntry)
-		if packet.Domain == learned.Domain && packet.Remote != learned.Remote {
-			if opt.Verbose {
-				logger.Printf("Domain=%s DstMAC=%s SrcMAC=%s Remote=%s, previously learned from Remote=%s",
-					packet.Domain, eth.DstMAC, eth.SrcMAC, packet.Remote, learned.Remote)
-			}
+		learned := v.(*packetEntry)
+		if recv.Domain == learned.Domain && recv.Remote != learned.Remote {
 			ch <- &val
 		}
 	}
