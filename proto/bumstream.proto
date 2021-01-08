@@ -5,11 +5,11 @@ package protobuf;
 option go_package=".;bumpb";
 
 service BumSniffService {
-    rpc Sniff (Filter) returns (stream Packet){};
+    rpc Sniff (Request) returns (stream Packet){};
 }
 
-message Filter {
-    string bpf    = 1;
+message Request {
+    string filter = 1;
     string domain = 2;
 }
 

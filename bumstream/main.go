@@ -41,7 +41,7 @@ func getEnv(key, fallback string) string {
 }
 
 type cmdOption struct {
-	Address   string `short:"a" long:"addr"      description:"gRPC address to serve" value-name:"<addr>"`
+	Address   string `short:"a" long:"addr"      description:"gRPC address to serve" value-name:"<addr>" default:"127.0.0.1:50005"`
 	Interface string `short:"i" long:"interface" description:"Read packets from the interface" value-name:"<interface>"`
 	Filepath  string `short:"r" long:"read"      description:"Read packets from the pcap file" hidden:"true"`
 }
@@ -64,14 +64,14 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 	return &opt, nil
 }
 
-type sniffer struct {
+type streamer struct {
 	sync.RWMutex
 
 	cache    *cache.TTLCache
 	channels []chan<- *pb.Packet
 }
 
-func NewSniffer() *sniffer {
+func NewStreamer() *streamer {
 	// Redis pool to lookup when the label key would not be found or expited.
 	r := &redis.Pool{
 		MaxIdle:     2,
@@ -101,14 +101,14 @@ func NewSniffer() *sniffer {
 		return t, true
 	})
 
-	return &sniffer{
+	return &streamer{
 		cache:    c,
 		channels: []chan<- *pb.Packet{},
 	}
 
 }
 
-func (s *sniffer) Serve(handle *pcap.Handle) error {
+func (s *streamer) Serve(handle *pcap.Handle) error {
 	var eth layers.Ethernet
 	var vpls l2vpn.VPLS
 	var pwmcw l2vpn.PWMCW
@@ -137,14 +137,14 @@ func (s *sniffer) Serve(handle *pcap.Handle) error {
 			continue
 		}
 
+		rawData := append(eth.Contents, eth.Payload...)
+		dupData := make([]byte, len(rawData))
+		copy(dupData, rawData)
+
 		v, ok := s.cache.Get(vpls.Label)
 		if !ok {
 			continue
 		}
-
-		rawData := append(eth.Contents, eth.Payload...)
-		dupData := make([]byte, len(rawData))
-		copy(dupData, rawData)
 
 		t := v.(*struct{ Domain, Remote string })
 		p := &pb.Packet{
@@ -159,7 +159,7 @@ func (s *sniffer) Serve(handle *pcap.Handle) error {
 	}
 }
 
-func (s *sniffer) Publish(p *pb.Packet) {
+func (s *streamer) Publish(p *pb.Packet) {
 	s.RLock()
 	defer s.RUnlock()
 
@@ -168,14 +168,14 @@ func (s *sniffer) Publish(p *pb.Packet) {
 	}
 }
 
-func (s *sniffer) Subscribe(ch chan<- *pb.Packet) {
+func (s *streamer) Subscribe(ch chan<- *pb.Packet) {
 	s.Lock()
 	defer s.Unlock()
 
 	s.channels = append(s.channels, ch)
 }
 
-func (s *sniffer) Unsubscribe(ch chan<- *pb.Packet) {
+func (s *streamer) Unsubscribe(ch chan<- *pb.Packet) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -186,10 +186,10 @@ func (s *sniffer) Unsubscribe(ch chan<- *pb.Packet) {
 	}
 }
 
-func (s *sniffer) Sniff(filter *pb.Filter, stream pb.BumSniffService_SniffServer) (err error) {
+func (s *streamer) Sniff(req *pb.Request, stream pb.BumSniffService_SniffServer) (err error) {
 	var bpf *pcap.BPF
-	if filter.Bpf != "" {
-		bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, snapshotLen, filter.Bpf)
+	if req.Filter != "" {
+		bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, snapshotLen, req.Filter)
 		if err != nil {
 			return err
 		}
@@ -202,13 +202,13 @@ func (s *sniffer) Sniff(filter *pb.Filter, stream pb.BumSniffService_SniffServer
 	s.Subscribe(ch)
 	defer s.Unsubscribe(ch)
 
-	log.Printf("registered sniffer[%s]: domain='%s' filter='%s'", id.String(), filter.Domain, filter.Bpf)
+	log.Printf("registered stream sniffer[%s]: domain='%s' filter='%s'", id.String(), req.Domain, req.Filter)
 	for packet := range ch {
-		if filter.Domain != "" && filter.Domain != packet.Domain {
+		if req.Domain != "" && req.Domain != packet.Domain {
 			continue
 		}
 
-		if filter.Bpf != "" {
+		if req.Filter != "" {
 			ci := gopacket.CaptureInfo{
 				Timestamp:     packet.Timestamp.AsTime(),
 				CaptureLength: len(packet.Data),
@@ -226,7 +226,7 @@ func (s *sniffer) Sniff(filter *pb.Filter, stream pb.BumSniffService_SniffServer
 		}
 	}
 
-	log.Printf("unregistered sniffer[%s]", id.String())
+	log.Printf("unregistered stream sniffer[%s]", id.String())
 	return nil
 }
 
@@ -234,7 +234,7 @@ func main() {
 	// MPLS Decoder should assume that the MPLS payload is a Ethenet frame with a control-word header
 	layers.MPLSPayloadDecoder = &l2vpn.PWMCWDecoder{ControlWord: true}
 
-	sniffServer := NewSniffer()
+	ss := NewStreamer()
 	opt, err := NewCmdOption(os.Args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -256,15 +256,15 @@ func main() {
 	errGroup.Go(func() error {
 		log.Println("start gRPC server")
 
-		listener, err := net.Listen("tcp", opt.Address)
+		li, err := net.Listen("tcp", opt.Address)
 		if err != nil {
-			return fmt.Errorf("Failed to listen: %v", err)
+			return fmt.Errorf("failed to listen: %v", err)
 		}
 
 		kaep := keepalive.EnforcementPolicy{MinTime: 5 * time.Second}
-		grpcServer := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep))
-		pb.RegisterBumSniffServiceServer(grpcServer, sniffServer)
-		if err := grpcServer.Serve(listener); err != nil {
+		gs := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep))
+		pb.RegisterBumSniffServiceServer(gs, ss)
+		if err := gs.Serve(li); err != nil {
 			return fmt.Errorf("failed to start gRPC server: %v", err)
 		}
 
@@ -274,15 +274,15 @@ func main() {
 	errGroup.Go(func() error {
 		log.Println("start BUM sniffer server")
 
-		handle, err := openHandle()
+		ha, err := openHandle()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		defer handle.Close()
+		defer ha.Close()
 
-		if err := sniffServer.Serve(handle); err != nil {
-			return fmt.Errorf("failed to start BUM sniffer server: %v", err)
+		if err := ss.Serve(ha); err != nil {
+			return fmt.Errorf("failed to start BUM stream server: %v", err)
 		}
 
 		return nil

@@ -40,7 +40,7 @@ func getEnv(key, fallback string) string {
 }
 
 type cmdOption struct {
-	Address  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:":50005"`
+	Address  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:"127.0.0.1:50005"`
 	Interval uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
 }
 
@@ -57,13 +57,13 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 	return &opt, nil
 }
 
-type packetEntry struct {
+type packetFDBEntry struct {
 	Domain, Remote, SrcMAC string
 }
 
-func record(db influx.Client, ch chan *packetEntry, interval uint) {
+func record(db influx.Client, ch chan *packetFDBEntry, interval uint) {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
-	count := make(map[packetEntry]int)
+	count := make(map[packetFDBEntry]int)
 	bpcfg := influx.BatchPointsConfig{Database: getEnv("INFLUXDB_NAME", influxDBName), Precision: "s"}
 
 	for {
@@ -91,9 +91,9 @@ func record(db influx.Client, ch chan *packetEntry, interval uint) {
 			}
 
 			if err := db.Write(bp); err != nil {
-				logger.Printf("Could not write points to InfluxDB: %s", err.Error())
+				logger.Printf("failed to write points: %v", err)
 			} else {
-				logger.Printf("Dump %d points to InfluxDB.", n)
+				logger.Printf("dump %d points", n)
 			}
 		}
 	}
@@ -115,19 +115,19 @@ func main() {
 
 	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("failed to connect with server %v", err)
+		log.Fatalf("failed to connect with server: %v", err)
 	}
 	defer conn.Close()
 
-	ch := make(chan *packetEntry, 1000)
+	ch := make(chan *packetFDBEntry, 1000)
 	defer close(ch)
 
 	go record(db, ch, opt.Interval)
 
 	client := pb.NewBumSniffServiceClient(conn)
-	stream, err := client.Sniff(context.Background(), &pb.Filter{})
+	stream, err := client.Sniff(context.Background(), &pb.Request{})
 	if err != nil {
-		log.Fatalf("open stream error %v", err)
+		log.Fatalf("failed to open stream:r %v", err)
 	}
 
 	fdb := cache.NewTTLCache(12 * time.Hour)
@@ -137,15 +137,15 @@ func main() {
 			break
 		}
 		if err != nil {
-			log.Fatalf("cannot receive %v", err)
+			log.Fatalf("failed to recieve packet: %v", err)
 		}
 
 		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)
 		ethLayer := packet.Layer(layers.LayerTypeEthernet)
 		eth, _ := ethLayer.(*layers.Ethernet)
 
-		key := packetEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain}
-		val := packetEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain, Remote: recv.Remote}
+		key := packetFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain}
+		val := packetFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain, Remote: recv.Remote}
 
 		v, ok := fdb.Get(key)
 		fdb.Set(key, &val)
@@ -154,7 +154,7 @@ func main() {
 		}
 
 		// Get the last learned Domain, Remote and SrcMAC and check if the Remote has changed
-		learned := v.(*packetEntry)
+		learned := v.(*packetFDBEntry)
 		if recv.Domain == learned.Domain && recv.Remote != learned.Remote {
 			ch <- &val
 		}

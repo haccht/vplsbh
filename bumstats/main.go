@@ -40,7 +40,7 @@ func getEnv(key, fallback string) string {
 }
 
 type cmdOption struct {
-	Address  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>"`
+	Address  string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:"127.0.0.1:50005"`
 	Interval uint   `short:"t" long:"interval"  description:"Interval time in sec to record" value-name:"<interval>" default:"3"`
 }
 
@@ -91,9 +91,9 @@ func record(db influx.Client, ch chan *packetTags, interval uint) {
 			}
 
 			if err := db.Write(bp); err != nil {
-				logger.Printf("Could not write points to InfluxDB: %s", err.Error())
+				logger.Printf("failed to write points: %v", err)
 			} else {
-				logger.Printf("Dump %d points to InfluxDB.", n)
+				logger.Printf("dump %d points", n)
 			}
 		}
 	}
@@ -115,7 +115,7 @@ func main() {
 
 	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("failed to connect with server %v", err)
+		log.Fatalf("failed to connect with server: %v", err)
 	}
 	defer conn.Close()
 
@@ -125,9 +125,9 @@ func main() {
 	go record(db, ch, opt.Interval)
 
 	client := pb.NewBumSniffServiceClient(conn)
-	stream, err := client.Sniff(context.Background(), &pb.Filter{})
+	stream, err := client.Sniff(context.Background(), &pb.Request{})
 	if err != nil {
-		log.Fatalf("open stream error %v", err)
+		log.Fatalf("failed to open stream: %v", err)
 	}
 
 	for {
@@ -136,7 +136,7 @@ func main() {
 			break
 		}
 		if err != nil {
-			log.Fatalf("cannot receive %v", err)
+			log.Fatalf("failed to receive packet: %v", err)
 		}
 
 		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)

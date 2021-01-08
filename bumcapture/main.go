@@ -22,7 +22,7 @@ const (
 )
 
 type cmdOption struct {
-	Address      string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>"`
+	Address      string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:"127.0.0.1:50005"`
 	BPFFilter    string `short:"e" long:"bpf"       description:"filter packets by BPF primitive" value-name:"<expression>"`
 	DomainFilter string `short:"d" long:"domain"    description:"filter packets by Bridge-Domain name" value-name:"<bdname>"`
 	PacketCount  uint   `short:"c" long:"count"     description:"exit after reading specified number of packets" value-name:"<count>"`
@@ -51,24 +51,23 @@ func main() {
 
 	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
 	if err != nil {
-		log.Fatalf("failed to connect with server %v", err)
+		log.Fatalf("failed to connect with server: %v", err)
 	}
 	defer conn.Close()
 
 	client := pb.NewBumSniffServiceClient(conn)
-	filter := &pb.Filter{Domain: opt.DomainFilter, Bpf: opt.BPFFilter}
+	req := &pb.Request{Filter: opt.BPFFilter, Domain: opt.DomainFilter}
 
-	stream, err := client.Sniff(context.Background(), filter)
+	stream, err := client.Sniff(context.Background(), req)
 	if err != nil {
-		log.Fatalf("open stream error %v", err)
+		log.Fatalf("failed to open stream: %v", err)
 	}
 
 	var w *pcapgo.Writer
 	if opt.WriteFile != "" {
 		f, err := os.Create(opt.WriteFile)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			log.Fatalf("failed to open file: %v", err)
 		}
 		defer f.Close()
 
@@ -83,7 +82,7 @@ func main() {
 			break
 		}
 		if err != nil {
-			log.Fatalf("cannot receive %v", err)
+			log.Fatalf("failed to receive packet: %v", err)
 		}
 
 		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)
