@@ -261,7 +261,7 @@ func main() {
 			return fmt.Errorf("failed to listen: %v", err)
 		}
 
-		kaep := keepalive.EnforcementPolicy{MinTime: 5 * time.Second}
+		kaep := keepalive.EnforcementPolicy{MinTime: 10 * time.Second}
 		gs := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep))
 		pb.RegisterBumSniffServiceServer(gs, ss)
 		if err := gs.Serve(li); err != nil {
@@ -276,8 +276,7 @@ func main() {
 
 		ha, err := openHandle()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			return fmt.Errorf("failed to open pcap handle")
 		}
 		defer ha.Close()
 
