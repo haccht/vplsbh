@@ -96,9 +96,11 @@ func main() {
 			w.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
 		}
 
-		np++
-		if np >= opt.PacketCount {
-			break
+		if opt.PacketCount != 0 {
+			np++
+			if np >= opt.PacketCount {
+				break
+			}
 		}
 	}
 }
