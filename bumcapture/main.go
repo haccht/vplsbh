@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -26,6 +27,7 @@ type cmdOption struct {
 	BPFFilter    string `short:"e" long:"bpf"       description:"filter packets by BPF primitive" value-name:"<expression>"`
 	DomainFilter string `short:"d" long:"domain"    description:"filter packets by Bridge-Domain name" value-name:"<bdname>"`
 	PacketCount  uint   `short:"c" long:"count"     description:"exit after reading specified number of packets" value-name:"<count>"`
+	Duration     uint   `short:"t" long:"duration"  description:"exit after specified seconds have elapsed" value-name:"<seconds>"`
 	WriteFile    string `short:"w" long:"write"     description:"write packets to the pcap file" value-name:"<filepath>"`
 }
 
@@ -49,20 +51,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
-	if err != nil {
-		log.Fatalf("failed to connect with server: %v", err)
-	}
-	defer conn.Close()
-
-	client := pb.NewBumSniffServiceClient(conn)
-	req := &pb.Request{Filter: opt.BPFFilter, Domain: opt.DomainFilter}
-
-	stream, err := client.Sniff(context.Background(), req)
-	if err != nil {
-		log.Fatalf("failed to open stream: %v", err)
-	}
-
 	var w *pcapgo.Writer
 	if opt.WriteFile != "" {
 		f, err := os.Create(opt.WriteFile)
@@ -75,6 +63,25 @@ func main() {
 		w.WriteFileHeader(snapshotLen, layers.LinkTypeEthernet)
 	}
 
+	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("failed to connect with server: %v", err)
+	}
+	defer conn.Close()
+
+	req := &pb.Request{Filter: opt.BPFFilter, Domain: opt.DomainFilter}
+	ctx, cancel := context.WithCancel(context.Background())
+	if opt.Duration != 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Second*time.Duration(opt.Duration))
+	}
+	defer cancel()
+
+	client := pb.NewBumSniffServiceClient(conn)
+	stream, err := client.Sniff(ctx, req)
+	if err != nil {
+		log.Fatalf("failed to open stream: %v", err)
+	}
+
 	var np uint
 	for {
 		recv, err := stream.Recv()
@@ -82,25 +89,26 @@ func main() {
 			break
 		}
 		if err != nil {
-			log.Fatalf("failed to receive packet: %v", err)
+			if ctx.Err() == context.DeadlineExceeded {
+				break
+			}
+			log.Fatalf("stop receiving packets: %v", err)
 		}
 
 		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)
-		ci := gopacket.CaptureInfo{Timestamp: recv.Timestamp.AsTime(), CaptureLength: len(recv.Data), Length: len(recv.Data)}
 
-		m := packet.Metadata()
-		m.CaptureInfo = ci
+		md := packet.Metadata()
+		ci := gopacket.CaptureInfo{Timestamp: recv.Timestamp.AsTime(), CaptureLength: len(recv.Data), Length: len(recv.Data)}
+		md.CaptureInfo = ci
 
 		fmt.Println(packet)
 		if w != nil {
 			w.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
 		}
 
-		if opt.PacketCount != 0 {
-			np++
-			if np >= opt.PacketCount {
-				break
-			}
+		np++
+		if opt.PacketCount != 0 && opt.PacketCount <= np {
+			break
 		}
 	}
 }

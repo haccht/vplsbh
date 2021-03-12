@@ -68,7 +68,7 @@ type streamer struct {
 	sync.RWMutex
 
 	cache    *cache.TTLCache
-	channels []chan<- *pb.Packet
+	channels map[string]chan *pb.Packet
 }
 
 func NewStreamer() *streamer {
@@ -103,7 +103,7 @@ func NewStreamer() *streamer {
 
 	return &streamer{
 		cache:    c,
-		channels: []chan<- *pb.Packet{},
+		channels: make(map[string]chan *pb.Packet, 10),
 	}
 
 }
@@ -164,26 +164,30 @@ func (s *streamer) Publish(p *pb.Packet) {
 	defer s.RUnlock()
 
 	for _, ch := range s.channels {
-		ch <- p
-	}
-}
-
-func (s *streamer) Subscribe(ch chan<- *pb.Packet) {
-	s.Lock()
-	defer s.Unlock()
-
-	s.channels = append(s.channels, ch)
-}
-
-func (s *streamer) Unsubscribe(ch chan<- *pb.Packet) {
-	s.Lock()
-	defer s.Unlock()
-
-	for i, v := range s.channels {
-		if v == ch {
-			s.channels = append(s.channels[:i], s.channels[i+1:]...)
+		select {
+		case ch <- p:
+		default:
+			// Ignore the packet if the channel is full
 		}
 	}
+}
+
+func (s *streamer) Subscribe(id string) chan *pb.Packet {
+	s.Lock()
+	defer s.Unlock()
+
+	log.Printf("[%s] register a new stream", id)
+	s.channels[id] = make(chan *pb.Packet, 1000)
+	return s.channels[id]
+}
+
+func (s *streamer) Unsubscribe(id string) {
+	s.Lock()
+	defer s.Unlock()
+
+	log.Printf("[%s] unregister the stream", id)
+	close(s.channels[id])
+	delete(s.channels, id)
 }
 
 func (s *streamer) Sniff(req *pb.Request, stream pb.BumSniffService_SniffServer) (err error) {
@@ -195,14 +199,10 @@ func (s *streamer) Sniff(req *pb.Request, stream pb.BumSniffService_SniffServer)
 		}
 	}
 
-	id := xid.New()
-	ch := make(chan *pb.Packet, 1000)
-	defer close(ch)
+	id := xid.New().String()
+	ch := s.Subscribe(id)
+	defer s.Unsubscribe(id)
 
-	s.Subscribe(ch)
-	defer s.Unsubscribe(ch)
-
-	log.Printf("registered stream sniffer[%s]: domain='%s' filter='%s'", id.String(), req.Domain, req.Filter)
 	for packet := range ch {
 		if req.Domain != "" && req.Domain != packet.Domain {
 			continue
@@ -221,12 +221,10 @@ func (s *streamer) Sniff(req *pb.Request, stream pb.BumSniffService_SniffServer)
 
 		//fmt.Println(gopacket.NewPacket(packet.Data, layers.LayerTypeEthernet, gopacket.Lazy))
 		if err := stream.Send(packet); err != nil {
-			log.Printf("failed to write to the stream: %v", err)
-			break
+			log.Printf("[%s] stop sending packets to the stream: %v", id, err)
+			return err
 		}
 	}
-
-	log.Printf("unregistered stream sniffer[%s]", id.String())
 	return nil
 }
 
@@ -242,16 +240,6 @@ func main() {
 	}
 
 	var errGroup errgroup.Group
-	var openHandle func() (*pcap.Handle, error)
-	if opt.Interface != "" {
-		openHandle = func() (*pcap.Handle, error) {
-			return pcap.OpenLive(opt.Interface, snapshotLen, promiscuous, pcap.BlockForever)
-		}
-	} else if opt.Filepath != "" {
-		openHandle = func() (*pcap.Handle, error) {
-			return pcap.OpenOffline(opt.Filepath)
-		}
-	}
 
 	errGroup.Go(func() error {
 		log.Println("start gRPC server")
@@ -273,6 +261,17 @@ func main() {
 
 	errGroup.Go(func() error {
 		log.Println("start BUM sniffer server")
+
+		var openHandle func() (*pcap.Handle, error)
+		if opt.Interface != "" {
+			openHandle = func() (*pcap.Handle, error) {
+				return pcap.OpenLive(opt.Interface, snapshotLen, promiscuous, pcap.BlockForever)
+			}
+		} else if opt.Filepath != "" {
+			openHandle = func() (*pcap.Handle, error) {
+				return pcap.OpenOffline(opt.Filepath)
+			}
+		}
 
 		ha, err := openHandle()
 		if err != nil {
