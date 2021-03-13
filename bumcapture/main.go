@@ -36,9 +36,6 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 
 	_, err := flags.ParseArgs(&opt, args)
 	if err != nil {
-		if err != flag.ErrHelp {
-			os.Exit(0)
-		}
 		return nil, err
 	}
 	return &opt, nil
@@ -46,6 +43,9 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 
 func main() {
 	opt, err := NewCmdOption(os.Args)
+	if err != flag.ErrHelp {
+		os.Exit(0)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -49,9 +49,6 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 
 	_, err := flags.ParseArgs(&opt, args)
 	if err != nil {
-		if err != flag.ErrHelp {
-			os.Exit(0)
-		}
 		return nil, err
 	}
 	return &opt, nil
@@ -101,6 +98,9 @@ func record(db influx.Client, ch chan *packetTags, interval uint) {
 
 func main() {
 	opt, err := NewCmdOption(os.Args)
+	if err != flag.ErrHelp {
+		os.Exit(0)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -119,16 +119,16 @@ func main() {
 	}
 	defer conn.Close()
 
-	ch := make(chan *packetTags, 1000)
-	defer close(ch)
-
-	go record(db, ch, opt.Interval)
-
 	client := pb.NewBumSniffServiceClient(conn)
 	stream, err := client.Sniff(context.Background(), &pb.Request{})
 	if err != nil {
 		log.Fatalf("failed to open stream: %v", err)
 	}
+
+	ch := make(chan *packetTags, 1000)
+	defer close(ch)
+
+	go record(db, ch, opt.Interval)
 
 	for {
 		recv, err := stream.Recv()
