@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -43,10 +42,10 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 
 func main() {
 	opt, err := NewCmdOption(os.Args)
-	if err != flag.ErrHelp {
-		os.Exit(0)
-	}
 	if err != nil {
+		if fe, ok := err.(*flags.Error); ok && fe.Type == flags.ErrHelp {
+			os.Exit(0)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

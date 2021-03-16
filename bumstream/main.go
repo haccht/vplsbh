@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -51,9 +50,6 @@ func NewCmdOption(args []string) (*cmdOption, error) {
 
 	_, err := flags.ParseArgs(&opt, args)
 	if err != nil {
-		if err != flag.ErrHelp {
-			os.Exit(0)
-		}
 		return nil, err
 	}
 
@@ -235,6 +231,9 @@ func main() {
 	ss := NewStreamer()
 	opt, err := NewCmdOption(os.Args)
 	if err != nil {
+		if fe, ok := err.(*flags.Error); ok && fe.Type == flags.ErrHelp {
+			os.Exit(0)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
