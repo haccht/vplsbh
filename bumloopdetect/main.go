@@ -146,16 +146,14 @@ func main() {
 		key := packetFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain}
 		val := packetFDBEntry{SrcMAC: eth.SrcMAC.String(), Domain: recv.Domain, Remote: recv.Remote}
 
-		v, ok := fdb.Get(key)
-		fdb.Set(key, &val)
-		if !ok {
-			continue
+		if v, ok := fdb.Get(key); ok {
+			// Get the last learned Domain, Remote and SrcMAC and check if the Remote has changed
+			learned := v.(packetFDBEntry)
+			if recv.Domain == learned.Domain && recv.Remote != learned.Remote {
+				ch <- &val
+			}
 		}
 
-		// Get the last learned Domain, Remote and SrcMAC and check if the Remote has changed
-		learned := v.(*packetFDBEntry)
-		if recv.Domain == learned.Domain && recv.Remote != learned.Remote {
-			ch <- &val
-		}
+		fdb.Set(key, val)
 	}
 }

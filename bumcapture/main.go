@@ -100,6 +100,7 @@ func main() {
 		ci := gopacket.CaptureInfo{Timestamp: recv.Timestamp.AsTime(), CaptureLength: len(recv.Data), Length: len(recv.Data)}
 		md.CaptureInfo = ci
 
+		fmt.Printf("DOMAIN: %s, REMOTE: %s, LABEL: %d\n", recv.Domain, recv.Remote, recv.Label)
 		fmt.Println(packet)
 		if w != nil {
 			w.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
