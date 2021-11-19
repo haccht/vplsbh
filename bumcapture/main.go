@@ -24,6 +24,7 @@ const (
 type cmdOption struct {
 	Address      string `short:"a" long:"addr"      description:"gRPC address to connect to" value-name:"<addr>" default:"127.0.0.1:50005"`
 	BPFFilter    string `short:"e" long:"bpf"       description:"filter packets by BPF primitive" value-name:"<expression>"`
+	RemoteFilter string `short:"r" long:"remote"    description:"filter packets by Remote-Router name" value-name:"<remote>"`
 	DomainFilter string `short:"d" long:"domain"    description:"filter packets by Bridge-Domain name" value-name:"<bdname>"`
 	PacketCount  uint   `short:"c" long:"count"     description:"exit after reading specified number of packets" value-name:"<count>"`
 	Duration     uint   `short:"t" long:"duration"  description:"exit after specified seconds have elapsed" value-name:"<seconds>"`
@@ -68,7 +69,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	req := &pb.Request{Filter: opt.BPFFilter, Domain: opt.DomainFilter}
+	req := &pb.Request{Filter: opt.BPFFilter, Remote: opt.RemoteFilter, Domain: opt.DomainFilter}
 	ctx, cancel := context.WithCancel(context.Background())
 	if opt.Duration != 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Second*time.Duration(opt.Duration))

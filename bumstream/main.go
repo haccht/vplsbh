@@ -200,6 +200,10 @@ func (s *streamer) Sniff(req *pb.Request, stream pb.BumSniffService_SniffServer)
 	defer s.Unsubscribe(id)
 
 	for packet := range ch {
+		if req.Remote != "" && req.Remote != packet.Remote {
+			continue
+		}
+
 		if req.Domain != "" && req.Domain != packet.Domain {
 			continue
 		}
