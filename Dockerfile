@@ -1,4 +1,4 @@
-FROM golang:1.13
+FROM golang:1.19
 
 RUN apt-get -y update && \
     apt-get -y install libpcap-dev
