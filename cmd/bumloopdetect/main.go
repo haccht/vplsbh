@@ -17,7 +17,7 @@ import (
 	influx "github.com/influxdata/influxdb1-client/v2"
 
 	"github.com/haccht/vplsbh/cache"
-	pb "github.com/haccht/vplsbh/proto"
+	pb "github.com/haccht/vplsbh/pkg/grpc"
 )
 
 const (

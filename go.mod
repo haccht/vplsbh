@@ -1,15 +1,23 @@
 module github.com/haccht/vplsbh
 
-go 1.13
+go 1.19
 
 require (
-	github.com/golang/protobuf v1.4.3
-	github.com/gomodule/redigo v2.0.0+incompatible
-	github.com/google/gopacket v1.1.17
-	github.com/influxdata/influxdb1-client v0.0.0-20200515024757-02f0bf5dbca3
-	github.com/jessevdk/go-flags v1.4.0
-	github.com/rs/xid v1.2.1
-	golang.org/x/sync v0.0.0-20190423024810-112230192c58
-	google.golang.org/grpc v1.34.0
-	google.golang.org/protobuf v1.25.0
+	github.com/golang/protobuf v1.5.2
+	github.com/gomodule/redigo v1.8.9
+	github.com/google/gopacket v1.1.19
+	github.com/influxdata/influxdb1-client v0.0.0-20220302092344-a9ab5670611c
+	github.com/jessevdk/go-flags v1.5.0
+	github.com/rs/xid v1.4.0
+	golang.org/x/sync v0.1.0
+	google.golang.org/grpc v1.50.1
+	google.golang.org/protobuf v1.28.1
+)
+
+require (
+	golang.org/x/net v0.0.0-20201021035429-f5854403a974 // indirect
+	golang.org/x/sys v0.0.0-20210320140829-1e4c9ba3b0c4 // indirect
+	golang.org/x/text v0.3.3 // indirect
+	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
+	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.2.0 // indirect
 )
