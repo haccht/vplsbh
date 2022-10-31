@@ -19,5 +19,6 @@ message Packet {
     uint32 label  = 2;
     string remote = 3;
     string domain = 4;
-    google.protobuf.Timestamp timestamp = 5;
+    string peerid = 5;
+    google.protobuf.Timestamp timestamp = 6;
 }

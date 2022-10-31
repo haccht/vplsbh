@@ -22,7 +22,7 @@ import (
 
 	"github.com/haccht/vplsbh/cache"
 	"github.com/haccht/vplsbh/l2vpn"
-	pb "github.com/haccht/vplsbh/proto"
+	pb "github.com/haccht/vplsbh/pkg/grpc"
 )
 
 const (
@@ -83,13 +83,13 @@ func NewStreamer() *streamer {
 		defer conn.Close()
 
 		key := fmt.Sprintf("label:%d", k)
-		val, err := redis.Values(conn.Do("HMGET", key, "Domain", "Remote"))
+		val, err := redis.Values(conn.Do("HMGET", key, "Domain", "Remote", "PeerID"))
 		if err != nil {
 			return nil, false
 		}
 
-		t := &struct{ Domain, Remote string }{}
-		if _, err := redis.Scan(val, &t.Domain, &t.Remote); err != nil {
+		t := &struct{ Domain, Remote, PeerID string }{}
+		if _, err := redis.Scan(val, &t.Domain, &t.Remote, &t.PeerID); err != nil {
 			return nil, false
 		}
 
@@ -142,12 +142,13 @@ func (s *streamer) Serve(handle *pcap.Handle) error {
 			continue
 		}
 
-		t := v.(*struct{ Domain, Remote string })
+		t := v.(*struct{ Domain, Remote, PeerID string })
 		p := &pb.Packet{
 			Data:      dupData,
 			Label:     vpls.Label,
 			Domain:    t.Domain,
 			Remote:    t.Remote,
+			Peerid:    t.PeerID,
 			Timestamp: timestamppb.New(ci.Timestamp),
 		}
 

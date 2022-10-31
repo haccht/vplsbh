@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/jessevdk/go-flags"
 	"google.golang.org/grpc"
 
-	pb "github.com/haccht/vplsbh/proto"
+	pb "github.com/haccht/vplsbh/pkg/grpc"
 )
 
 const (
@@ -60,7 +61,7 @@ func main() {
 		defer f.Close()
 
 		w = pcapgo.NewWriter(f)
-		w.WriteFileHeader(snapshotLen, layers.LinkTypeEthernet)
+		w.WriteFileHeader(snapshotLen, layers.LinkTypeIPv4)
 	}
 
 	conn, err := grpc.Dial(opt.Address, grpc.WithInsecure())
@@ -95,10 +96,39 @@ func main() {
 			log.Fatalf("stop receiving packets: %v", err)
 		}
 
-		packet := gopacket.NewPacket(recv.Data, layers.LayerTypeEthernet, gopacket.Lazy)
+		ip := &layers.IPv4{
+			Version:  4,
+			IHL:      5,
+			TTL:      64,
+			Protocol: layers.IPProtocolEtherIP,
+			SrcIP:    net.ParseIP(recv.Peerid),
+			DstIP:    net.ParseIP("0.0.0.0"),
+		}
+		etherip := &layers.EtherIP{
+			Version: 3,
+		}
 
+		buf := gopacket.NewSerializeBuffer()
+		opts := gopacket.SerializeOptions{}
+		var bytes []byte
+
+		if bytes, err = buf.PrependBytes(len(recv.Data)); err != nil {
+			break
+		}
+		copy(bytes, recv.Data)
+
+		if bytes, err = buf.PrependBytes(2); err != nil {
+			break
+		}
+		bytes[0] = (etherip.Version << 4)
+
+		if err := ip.SerializeTo(buf, opts); err != nil {
+			break
+		}
+
+		packet := gopacket.NewPacket(buf.Bytes(), layers.LayerTypeIPv4, gopacket.Lazy)
 		md := packet.Metadata()
-		ci := gopacket.CaptureInfo{Timestamp: recv.Timestamp.AsTime(), CaptureLength: len(recv.Data), Length: len(recv.Data)}
+		ci := gopacket.CaptureInfo{Timestamp: recv.Timestamp.AsTime(), CaptureLength: len(packet.Data()), Length: len(packet.Data())}
 		md.CaptureInfo = ci
 
 		fmt.Printf("DOMAIN: %s, REMOTE: %s, LABEL: %d\n", recv.Domain, recv.Remote, recv.Label)
